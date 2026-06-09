@@ -1,0 +1,45 @@
+# STM32 CubeMX 生成文件
+*.mxproject
+*.launch
+
+# 编译产物
+build/
+Debug/
+Release/
+*.o
+*.d
+*.elf
+*.hex
+*.bin
+*.map
+*.lst
+*.axf
+*.dep
+
+# IDE 配置
+.vscode/
+.idea/
+*.uvguix.*
+*.uvoptx
+*.scvd
+JLinkLog.txt
+*.jlink
+
+# 操作系统生成
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# 临时文件
+*.tmp
+*.bak
+*.swp
+*~
+
+# 压缩包
+*.rar
+*.zip
+*.7z
+
+# CubeMX 备份
+*.bak
