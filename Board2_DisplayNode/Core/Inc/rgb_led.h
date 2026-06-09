@@ -1,7 +1,7 @@
 /**
  * @file    rgb_led.h
  * @brief   共阴 RGB LED PWM 控制
- * @note    TIM2 CH1 (PA5) = Red, CH2 (PA6) = Green, CH3 (PA7) = Blue
+ * @note    TIM3 CH1 (PA6) = Red, CH2 (PA7) = Green, CH3 (PB0) = Blue
  *          PWM 频率 1kHz，占空比范围 0-999 (对应 0%-100%)
  */
 
@@ -11,11 +11,11 @@
 #include "main.h"
 
 /* ==================== 配置宏 ==================== */
-#define RGB_TIM_HANDLE        (&htim2)
+#define RGB_TIM_HANDLE        (&htim3)
 
-#define RGB_RED_CHANNEL       TIM_CHANNEL_1   /* PA5 */
-#define RGB_GREEN_CHANNEL     TIM_CHANNEL_2   /* PA6 */
-#define RGB_BLUE_CHANNEL      TIM_CHANNEL_3   /* PA7 */
+#define RGB_RED_CHANNEL       TIM_CHANNEL_1   /* PA6  TIM3_CH1 */
+#define RGB_GREEN_CHANNEL     TIM_CHANNEL_2   /* PA7  TIM3_CH2 */
+#define RGB_BLUE_CHANNEL      TIM_CHANNEL_3   /* PB0  TIM3_CH3 */
 
 #define PWM_PERIOD            999             /* ARR = 1000-1 */
 

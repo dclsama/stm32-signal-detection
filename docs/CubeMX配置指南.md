@@ -30,7 +30,7 @@ HSE (8MHz) → PLL ×9 → SYSCLK = 72MHz
 | 配置项 | 值 | 说明 |
 |--------|-----|------|
 | Interface | CMSIS_V2 | CMSIS-RTOS v2 API |
-| Total Heap Size | 15360 (15KB) | 5~8 个任务足够 |
+| Total Heap Size | 3072 (3KB, 默认) | 静态分配任务，堆仅用于队列/信号量，3KB 足够 |
 | USE_TIMERS | Enabled | 软件定时器 |
 | MAX_PRIORITIES | 7 | 优先级 0~6 |
 
@@ -44,14 +44,17 @@ HSE (8MHz) → PLL ×9 → SYSCLK = 72MHz
 | Parity | None |
 | Stop Bits | 1 |
 
-#### Timers: TIM2
+#### Timers: TIM3
 | Channel | Pin | Mode |
 |---------|-----|------|
-| CH1 | PA5 | PWM Generation CH1 |
-| CH2 | PA6 | PWM Generation CH2 |
-| CH3 | PA7 | PWM Generation CH3 |
+| CH1 | PA6 | PWM Generation CH1 |
+| CH2 | PA7 | PWM Generation CH2 |
+| CH3 | PB0 | PWM Generation CH3 |
 | Prescaler | 71 | 72MHz / 72 = 1MHz |
 | Counter Period | 999 | 1MHz / 1000 = 1kHz PWM |
+
+> ⚠️ STM32F103C8T6 的 PA5/PA6/PA7 没有 TIM2 通道，必须用 TIM3。
+> PA6=TIM3_CH1, PA7=TIM3_CH2, PB0=TIM3_CH3
 
 ---
 
@@ -60,16 +63,23 @@ HSE (8MHz) → PLL ×9 → SYSCLK = 72MHz
 ### Analog: ADC1
 | 配置项 | 值 |
 |--------|-----|
-| IN1 (PA1) | Single-ended |
-| Resolution | 12 Bits |
-| Continuous Conversion Mode | Enabled |
-| DMA Continuous Requests | Enabled |
-| Scan Conversion Mode | Disabled (单通道) |
+| IN1 (PA1) | 直接选 ADC1_IN1 即可 (F103 仅支持单端) |
+| Continuous Conversion Mode | Enabled | 使能连续转换 |
+| Scan Conversion Mode | Disabled | 单通道不扫描 |
 
 ### ADC1 DMA 配置
-| DMA | Stream | Direction | Mode | Data Width |
-|-----|--------|-----------|------|------------|
-| DMA1 Channel 1 | - | Peripheral to Memory | Circular | Word |
+在 ADC1 → DMA Settings 标签页 → Add → 选 ADC1：
+
+| 参数 | 值 |
+|------|-----|
+| DMA Request | ADC1 |
+| Channel | DMA1 Channel 1 |
+| Direction | Peripheral to Memory |
+| Mode | **Circular** |
+| Peripheral Data Width | Half Word |
+| Memory Data Width | Half Word |
+| Memory Address Increment | Enabled |
+
 
 ### Connectivity: SPI2
 | Pin | Signal |
@@ -80,7 +90,7 @@ HSE (8MHz) → PLL ×9 → SYSCLK = 72MHz
 | Mode | Full-Duplex Master |
 | Data Size | 8 Bits |
 | CPOL/CPHA | Low / 1 Edge (Mode 0) |
-| Prescaler | /8 → 9MHz (< W25Q64 最大 80MHz) |
+| Prescaler | /4 → 9MHz (36MHz/4, W25Q64 最大 80MHz) |
 | NSS | Software (PA4 手动控制) |
 
 ### Connectivity: CAN1
