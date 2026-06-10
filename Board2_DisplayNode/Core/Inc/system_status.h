@@ -21,6 +21,8 @@ typedef enum {
 #define ERR_DHT11_TIMEOUT       0x01
 #define ERR_DHT11_CHECKSUM      0x02
 #define ERR_ADC_FAIL            0x03
+#define ERR_TEMP_HIGH           0x04
+#define ERR_VOLT_LOW            0x05
 #define ERR_CAN_TIMEOUT         0x10
 #define ERR_CAN_BUSOFF          0x11
 

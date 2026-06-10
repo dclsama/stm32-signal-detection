@@ -120,18 +120,49 @@ void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan_ptr)
 
 void Task_CAN_RX(void *argument)
 {
+    CAN_TxHeaderTypeDef cmd_tx = {0};
+    uint8_t cmd_data = 0xAA;
+    uint32_t tx_mailbox;
+    uint8_t alarm_sent = 0;
+
     CAN_Receiver_Init();
     CAN_Receiver_Start();
+
+    cmd_tx.StdId = CAN_ID_ACK;    /* 0x301 */
+    cmd_tx.ExtId = 0;
+    cmd_tx.IDE   = CAN_ID_STD;
+    cmd_tx.RTR   = CAN_RTR_DATA;
+    cmd_tx.DLC   = 1;
 
     printf("[CAN RX] Ready, Filter: 0x201 & 0x202\r\n");
 
     for (;;) {
+        uint8_t got_data = 0;
         if (osSemaphoreAcquire(CANSemaphore, pdMS_TO_TICKS(2000)) == osOK) {
+            /* ISR 已搬运数据到缓冲, 任务中做校验和打印 */
+            CAN_Receiver_ProcessTask();
             SystemStatus_FeedCAN();
             osEventFlagsSet(DisplayEventFlags, EVENT_DATA_UPDATED);
+            got_data = 1;
         } else {
             printf("[CAN RX] Timeout!\r\n");
             osEventFlagsSet(DisplayEventFlags, EVENT_STATUS_UPDATED);
+        }
+
+        /* ==== 命令帧: 检测到告警时发 0x301 清告警 ==== */
+        if (got_data && g_can_rx_data.status_updated) {
+            uint8_t st = g_can_rx_data.status.system_status;
+            if ((st == SYSTEM_ERROR1 || st == SYSTEM_ERROR2) && !alarm_sent) {
+                /* 发送 0x301 命令 → Board1 清告警 */
+                if (HAL_CAN_AddTxMessage(&hcan, &cmd_tx,
+                                         &cmd_data, &tx_mailbox) == HAL_OK) {
+                    printf("[CAN TX] Command 0x301 → Clear Alarm\r\n");
+                    alarm_sent = 1;
+                }
+            }
+            if (st == SYSTEM_SAFE) {
+                alarm_sent = 0;  /* 恢复后可再次发命令 */
+            }
         }
     }
 }
@@ -139,17 +170,22 @@ void Task_CAN_RX(void *argument)
 void Task_OLED(void *argument)
 {
     char line1[22], line2[22], line3[22], line4[22];
+    char limit_temp[12], limit_volt[12];
     SystemStatus_t prev_status = SYSTEM_SAFE;
 
     OLED_Init();
     OLED_Clear();
 
     /* 启动画面 */
-    OLED_ShowString(20, 1, "STM32 Signal");
-    OLED_ShowString(14, 3, "Detection System");
-    OLED_ShowString(26, 5, "Board 2: RX");
-    vTaskDelay(pdMS_TO_TICKS(2000));
+    OLED_ShowString(18, 1, "Signal Detection");
+    OLED_ShowString(22, 3, "Board 2: RX");
+    vTaskDelay(pdMS_TO_TICKS(1500));
     OLED_Clear();
+
+    /* 阈值显示 (静态, 页0-1) */
+    /* 默认: 温度>30°C告警, 电压<1.50V告警 */
+    snprintf(limit_temp, sizeof(limit_temp), "Thr: T>30C");
+    snprintf(limit_volt, sizeof(limit_volt), "Thr: V<1.5V");
 
     for (;;) {
         SystemStatus_Check();
@@ -158,11 +194,14 @@ void Task_OLED(void *argument)
         if (g_can_rx_data.sensor_updated) {
             CAN_SensorFrame_t *s = &g_can_rx_data.sensor;
 
-            snprintf(line1, sizeof(line1), "Temp: %dC", s->temp_int);
-            snprintf(line2, sizeof(line2), "Humi: %d%%", s->humi_int);
-            snprintf(line3, sizeof(line3), "ADC: %d (%.2fV)",
-                     s->adc_value,
-                     (float)s->adc_value / 4095.0f * 3.3f);
+            /* 第一行: 温度 + 阈值 */
+            snprintf(line1, sizeof(line1), "T: %dC  limit>30C", s->temp_int);
+            /* 第二行: 电压 + 阈值 */
+            float volt = (float)s->adc_value / 4095.0f * 3.3f;
+            snprintf(line2, sizeof(line2), "V: %.2fV limit<1.5V", volt);
+            /* 第三行: 湿度 (辅助信息) */
+            snprintf(line3, sizeof(line3), "Humi: %d%%", s->humi_int);
+
             g_can_rx_data.sensor_updated = 0;
         } else {
             snprintf(line1, sizeof(line1), "Waiting data...");
@@ -170,16 +209,19 @@ void Task_OLED(void *argument)
             line3[0] = '\0';
         }
 
+        /* 第四行: 系统状态 */
         snprintf(line4, sizeof(line4), "[%s]", SystemStatus_GetString());
 
         /* 刷新 OLED */
-        OLED_ShowString(0, 0, line1);
-        OLED_ShowString(0, 2, line2);
-        OLED_ShowString(0, 4, line3);
+        OLED_ShowString(0, 1, line1);
+        OLED_ShowString(0, 3, line2);
+        OLED_ShowString(0, 5, line3);
 
-        /* 状态栏高亮 */
+        /* 状态栏: 告警时反色高亮 */
         if (status != prev_status) {
-            OLED_ShowHighlight(7);
+            if (status != SYSTEM_SAFE) {
+                OLED_ShowHighlight(7);  /* 告警高亮 */
+            }
             prev_status = status;
         }
         OLED_ShowString(0, 7, line4);

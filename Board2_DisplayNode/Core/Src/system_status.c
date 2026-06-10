@@ -93,9 +93,15 @@ void SystemStatus_Check(void)
 const char* SystemStatus_GetString(void)
 {
     switch (current_status) {
-        case SYSTEM_SAFE:   return "SAFE";
-        case SYSTEM_ERROR1: return "ERROR1: Sensor";
-        case SYSTEM_ERROR2: return "ERROR2: CAN";
-        default:            return "UNKNOWN";
+        case SYSTEM_SAFE:
+            return "SAFE";
+        case SYSTEM_ERROR1:
+            if (current_error == ERR_TEMP_HIGH) return "ERROR1: Temp High";
+            return "ERROR1: Sensor";
+        case SYSTEM_ERROR2:
+            if (current_error == ERR_VOLT_LOW)  return "ERROR2: Volt Low";
+            return "ERROR2: CAN";
+        default:
+            return "UNKNOWN";
     }
 }

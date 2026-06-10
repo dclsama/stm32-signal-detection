@@ -18,6 +18,11 @@
 #include "w25q64.h"
 #include "can_protocol.h"
 #include "system_status.h"
+#include "key.h"
+#include "rgb_modes.h"
+#include "buzzer.h"
+#include "threshold.h"
+#include "can_command.h"
 #include <stdio.h>
 #include <string.h>
 /* USER CODE END Includes */
@@ -59,6 +64,7 @@ TIM_HandleTypeDef htim3;
 
 UART_HandleTypeDef huart1;
 
+/* Definitions for defaultTask */
 osThreadId_t defaultTaskHandle;
 const osThreadAttr_t defaultTask_attributes = {
   .name = "defaultTask",
@@ -80,6 +86,14 @@ osThreadId_t TaskADCHandle;
 osThreadId_t TaskCANTXHandle;
 osThreadId_t TaskRGBHandle;
 osThreadId_t TaskFlashLogHandle;
+osThreadId_t TaskKeyScanHandle;
+osThreadId_t TaskCANCMDHandle;
+
+/* CAN RX 信号量 — ISR 唤醒命令处理 */
+osSemaphoreId_t CANCmdSemaphore;
+
+/* 当前蜂鸣器状态 (按键1 控制) */
+static BuzzerState_t buzzer_state = BEEP_OFF;
 
 /* 任务属性 */
 const osThreadAttr_t task_attr_normal = {
@@ -112,11 +126,27 @@ void Task_ADC(void *argument);
 void Task_CAN_TX(void *argument);
 void Task_RGB(void *argument);
 void Task_FlashLog(void *argument);
+void Task_KeyScan(void *argument);
+void Task_CAN_CMD(void *argument);
 
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+
+/* ==================== CAN RX 中断回调 (仅搬运数据) ==================== */
+
+void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan_ptr)
+{
+    CAN_RxHeaderTypeDef rx_header;
+    uint8_t rx_data[8];
+
+    if (HAL_CAN_GetRxMessage(hcan_ptr, CAN_RX_FIFO0,
+                             &rx_header, rx_data) == HAL_OK) {
+        CAN_Command_ProcessRx(&rx_header, rx_data);
+    }
+    osSemaphoreRelease(CANCmdSemaphore);
+}
 
 /* ==================== printf 重定向 ==================== */
 
@@ -223,13 +253,114 @@ void Task_CAN_TX(void *argument)
 
 void Task_RGB(void *argument)
 {
+    SensorData_t sensor_data;
+    DHT11_Data_t dht11;
+    ADC_Data_t adc;
+
     RGB_Init();
     vTaskDelay(pdMS_TO_TICKS(500));
 
     for (;;) {
         SystemStatus_Check();
-        RGB_SetStatus((uint8_t)SystemStatus_Get());
-        vTaskDelay(pdMS_TO_TICKS(500));
+
+        /* ==== 阈值检查 ==== */
+        /* 获取最新传感器数据 */
+        if (osMessageQueueGet(SensorDataQueue, &sensor_data, NULL, 0) == osOK) {
+            dht11 = sensor_data.dht11;
+        }
+        ADC_DMA_Read(&adc);
+
+        ThresholdResult_t thr = Threshold_Check(dht11.temperature, adc.voltage);
+
+        if (thr == THR_ERR_TEMP) {
+            SystemStatus_Set(SYSTEM_ERROR1, ERR_TEMP_HIGH);
+        } else if (thr == THR_ERR_VOLT) {
+            SystemStatus_Set(SYSTEM_ERROR2, ERR_VOLT_LOW);
+        }
+        /* 注意: CAN 超时由 SystemStatus_Check() 处理 */
+
+        /* ==== RGB 控制 ==== */
+        SystemStatus_t sys_status = SystemStatus_Get();
+
+        if (sys_status == SYSTEM_ERROR1) {
+            /* ERROR1 温度告警: 黄灯 + 蜂鸣器间断 */
+            RGB_SetStatus(1);  /* 黄 */
+            Buzzer_SetState(BEEP_INTERVAL);
+        } else if (sys_status == SYSTEM_ERROR2) {
+            /* ERROR2 电压告警: 红灯 + 蜂鸣器持续 */
+            RGB_SetStatus(2);  /* 红 */
+            Buzzer_SetState(BEEP_ON);
+        } else {
+            /* SAFE: 绿灯, 蜂鸣器静默 */
+            RGB_ModeBreatheTick();
+            if (Buzzer_GetState() != BEEP_OFF) {
+                Buzzer_SetState(BEEP_OFF);
+            }
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+}
+
+/**
+ * @brief  Task_KeyScan — 每 10ms 扫描按键, 处理模式切换
+ */
+void Task_KeyScan(void *argument)
+{
+    Key_Init();
+    Buzzer_Init();
+    RGB_Init();
+    RGB_ModeSet(MODE_GREEN_SOLID);        /* 初始: 绿灯常亮 */
+    Buzzer_SetState(BEEP_OFF);            /* 初始: 静默 */
+
+    vTaskDelay(pdMS_TO_TICKS(100));
+
+    for (;;) {
+        KeyEvent_t event = Key_Scan();
+        Buzzer_Tick();                    /* 间断蜂鸣器计时 */
+
+        switch (event) {
+            case KEY_EVENT_SHORT_1:
+                /* 按键1 短按: RGB 循环 + 蜂鸣器循环 */
+                RGB_ModeCycleNext();
+                Buzzer_CycleNext();
+                printf("[KEY1] Short Press → RGB:%d Buzzer:%d\r\n",
+                       RGB_ModeGet(), Buzzer_GetState());
+                break;
+
+            case KEY_EVENT_LONG_2:
+                /* 按键2 长按: 清除告警, 恢复 SAFE */
+                Threshold_ClearAlarm();
+                printf("[KEY2] Long Press → Alarm Cleared\r\n");
+                break;
+
+            case KEY_EVENT_RELEASE_2:
+                /* 按键2 释放 (无操作) */
+                break;
+
+            default:
+                break;
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(10));    /* 10ms 扫描周期 */
+    }
+}
+
+/**
+ * @brief  Task_CAN_CMD — 等待 0x301 命令帧, 清告警并回复
+ */
+void Task_CAN_CMD(void *argument)
+{
+    CAN_Command_Init();
+    CAN_Command_Start();
+
+    printf("[CAN CMD] Ready, Filter: 0x301\r\n");
+
+    for (;;) {
+        /* 等待 CAN RX 中断信号量 */
+        if (osSemaphoreAcquire(CANCmdSemaphore, osWaitForever) == osOK) {
+            CAN_Command_ProcessTask();  /* 任务中处理: 清告警 + 回复 */
+        }
     }
 }
 
@@ -281,11 +412,14 @@ void Task_FlashLog(void *argument)
   */
 int main(void)
 {
+
   /* USER CODE BEGIN 1 */
 
   /* USER CODE END 1 */
 
   /* MCU Configuration--------------------------------------------------------*/
+
+  /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
   HAL_Init();
 
   /* USER CODE BEGIN Init */
@@ -311,7 +445,13 @@ int main(void)
 
   /* 外设初始化 */
   SystemStatus_Init();
+  Key_Init();           /* 按键 PB1/PB2, 输入上拉 */
+  Buzzer_Init();        /* 蜂鸣器 PB8 */
+  RGB_Init();           /* RGB TIM3 PWM */
+  RGB_ModeSet(MODE_GREEN_SOLID);
   HAL_CAN_Start(&hcan);
+  CAN_Command_Init();  /* CAN RX 过滤器 (0x301) */
+  CAN_Command_Start(); /* CAN RX 中断使能 */
 
   printf("\r\n========================================\r\n");
   printf("  Board1: Sensor Node\r\n");
@@ -327,6 +467,9 @@ int main(void)
   /* USER CODE END RTOS_MUTEX */
 
   /* USER CODE BEGIN RTOS_SEMAPHORES */
+
+  CANCmdSemaphore = osSemaphoreNew(10, 0, NULL);
+
   /* USER CODE END RTOS_SEMAPHORES */
 
   /* USER CODE BEGIN RTOS_TIMERS */
@@ -350,6 +493,8 @@ int main(void)
   TaskCANTXHandle    = osThreadNew(Task_CAN_TX,   NULL, &task_attr_high);
   TaskRGBHandle      = osThreadNew(Task_RGB,      NULL, &task_attr_low);
   TaskFlashLogHandle = osThreadNew(Task_FlashLog, NULL, &task_attr_low);
+  TaskKeyScanHandle  = osThreadNew(Task_KeyScan,  NULL, &task_attr_normal);
+  TaskCANCMDHandle   = osThreadNew(Task_CAN_CMD,  NULL, &task_attr_high);
 
   /* USER CODE END RTOS_THREADS */
 
@@ -363,15 +508,21 @@ int main(void)
   osKernelStart();
 
   /* We should never get here as control is now taken by the scheduler */
+
+  /* Infinite loop */
+  /* USER CODE BEGIN WHILE */
   while (1)
   {
-  }
-}
+    /* USER CODE END WHILE */
 
-/* ==================== 以下为 CubeMX 生成的硬件初始化函数, 无需修改 ==================== */
+    /* USER CODE BEGIN 3 */
+  }
+  /* USER CODE END 3 */
+}
 
 /**
   * @brief System Clock Configuration
+  * @retval None
   */
 void SystemClock_Config(void)
 {
@@ -379,6 +530,9 @@ void SystemClock_Config(void)
   RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
   RCC_PeriphCLKInitTypeDef PeriphClkInit = {0};
 
+  /** Initializes the RCC Oscillators according to the specified parameters
+  * in the RCC_OscInitTypeDef structure.
+  */
   RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
   RCC_OscInitStruct.HSEState = RCC_HSE_ON;
   RCC_OscInitStruct.HSEPredivValue = RCC_HSE_PREDIV_DIV1;
@@ -391,6 +545,8 @@ void SystemClock_Config(void)
     Error_Handler();
   }
 
+  /** Initializes the CPU, AHB and APB buses clocks
+  */
   RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
                               |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
   RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
@@ -410,11 +566,26 @@ void SystemClock_Config(void)
   }
 }
 
-/* ==================== 外设初始化函数 (CubeMX 自动生成) ==================== */
-
+/**
+  * @brief ADC1 Initialization Function
+  * @param None
+  * @retval None
+  */
 static void MX_ADC1_Init(void)
 {
+
+  /* USER CODE BEGIN ADC1_Init 0 */
+
+  /* USER CODE END ADC1_Init 0 */
+
   ADC_ChannelConfTypeDef sConfig = {0};
+
+  /* USER CODE BEGIN ADC1_Init 1 */
+
+  /* USER CODE END ADC1_Init 1 */
+
+  /** Common config
+  */
   hadc1.Instance = ADC1;
   hadc1.Init.ScanConvMode = ADC_SCAN_DISABLE;
   hadc1.Init.ContinuousConvMode = ENABLE;
@@ -426,6 +597,9 @@ static void MX_ADC1_Init(void)
   {
     Error_Handler();
   }
+
+  /** Configure Regular Channel
+  */
   sConfig.Channel = ADC_CHANNEL_1;
   sConfig.Rank = ADC_REGULAR_RANK_1;
   sConfig.SamplingTime = ADC_SAMPLETIME_1CYCLE_5;
@@ -433,10 +607,27 @@ static void MX_ADC1_Init(void)
   {
     Error_Handler();
   }
+  /* USER CODE BEGIN ADC1_Init 2 */
+
+  /* USER CODE END ADC1_Init 2 */
+
 }
 
+/**
+  * @brief CAN Initialization Function
+  * @param None
+  * @retval None
+  */
 static void MX_CAN_Init(void)
 {
+
+  /* USER CODE BEGIN CAN_Init 0 */
+
+  /* USER CODE END CAN_Init 0 */
+
+  /* USER CODE BEGIN CAN_Init 1 */
+
+  /* USER CODE END CAN_Init 1 */
   hcan.Instance = CAN1;
   hcan.Init.Prescaler = 9;
   hcan.Init.Mode = CAN_MODE_NORMAL;
@@ -453,10 +644,28 @@ static void MX_CAN_Init(void)
   {
     Error_Handler();
   }
+  /* USER CODE BEGIN CAN_Init 2 */
+
+  /* USER CODE END CAN_Init 2 */
+
 }
 
+/**
+  * @brief SPI2 Initialization Function
+  * @param None
+  * @retval None
+  */
 static void MX_SPI2_Init(void)
 {
+
+  /* USER CODE BEGIN SPI2_Init 0 */
+
+  /* USER CODE END SPI2_Init 0 */
+
+  /* USER CODE BEGIN SPI2_Init 1 */
+
+  /* USER CODE END SPI2_Init 1 */
+  /* SPI2 parameter configuration*/
   hspi2.Instance = SPI2;
   hspi2.Init.Mode = SPI_MODE_MASTER;
   hspi2.Init.Direction = SPI_DIRECTION_2LINES;
@@ -473,18 +682,43 @@ static void MX_SPI2_Init(void)
   {
     Error_Handler();
   }
+  /* USER CODE BEGIN SPI2_Init 2 */
+
+  /* USER CODE END SPI2_Init 2 */
+
 }
 
+/**
+  * @brief TIM3 Initialization Function
+  * @param None
+  * @retval None
+  */
 static void MX_TIM3_Init(void)
 {
+
+  /* USER CODE BEGIN TIM3_Init 0 */
+
+  /* USER CODE END TIM3_Init 0 */
+
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
   TIM_OC_InitTypeDef sConfigOC = {0};
+
+  /* USER CODE BEGIN TIM3_Init 1 */
+
+  /* USER CODE END TIM3_Init 1 */
   htim3.Instance = TIM3;
   htim3.Init.Prescaler = 71;
   htim3.Init.CounterMode = TIM_COUNTERMODE_UP;
   htim3.Init.Period = 999;
   htim3.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
-  htim3.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE;
+  htim3.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
   if (HAL_TIM_PWM_Init(&htim3) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim3, &sMasterConfig) != HAL_OK)
   {
     Error_Handler();
   }
@@ -504,10 +738,28 @@ static void MX_TIM3_Init(void)
   {
     Error_Handler();
   }
+  /* USER CODE BEGIN TIM3_Init 2 */
+
+  /* USER CODE END TIM3_Init 2 */
+  HAL_TIM_MspPostInit(&htim3);
+
 }
 
+/**
+  * @brief USART1 Initialization Function
+  * @param None
+  * @retval None
+  */
 static void MX_USART1_UART_Init(void)
 {
+
+  /* USER CODE BEGIN USART1_Init 0 */
+
+  /* USER CODE END USART1_Init 0 */
+
+  /* USER CODE BEGIN USART1_Init 1 */
+
+  /* USER CODE END USART1_Init 1 */
   huart1.Instance = USART1;
   huart1.Init.BaudRate = 115200;
   huart1.Init.WordLength = UART_WORDLENGTH_8B;
@@ -520,37 +772,115 @@ static void MX_USART1_UART_Init(void)
   {
     Error_Handler();
   }
+  /* USER CODE BEGIN USART1_Init 2 */
+
+  /* USER CODE END USART1_Init 2 */
+
 }
 
-static void MX_GPIO_Init(void)
-{
-  /* CubeMX 自动生成, 此处留空 */
-}
-
+/**
+  * Enable DMA controller clock
+  */
 static void MX_DMA_Init(void)
 {
+
+  /* DMA controller clock enable */
   __HAL_RCC_DMA1_CLK_ENABLE();
-  HAL_NVIC_SetPriority(DMA1_Channel1_IRQn, 0, 0);
+
+  /* DMA interrupt init */
+  /* DMA1_Channel1_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA1_Channel1_IRQn, 5, 0);
   HAL_NVIC_EnableIRQ(DMA1_Channel1_IRQn);
+
 }
 
+/**
+  * @brief GPIO Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_GPIO_Init(void)
+{
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
+  /* USER CODE BEGIN MX_GPIO_Init_1 */
+
+  /* USER CODE END MX_GPIO_Init_1 */
+
+  /* GPIO Ports Clock Enable */
+  __HAL_RCC_GPIOD_CLK_ENABLE();
+  __HAL_RCC_GPIOA_CLK_ENABLE();
+  __HAL_RCC_GPIOB_CLK_ENABLE();
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_8, GPIO_PIN_RESET);
+
+  /*Configure GPIO pins : PB1 PB2 */
+  GPIO_InitStruct.Pin = GPIO_PIN_1|GPIO_PIN_2;
+  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : PB8 */
+  GPIO_InitStruct.Pin = GPIO_PIN_8;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+  /* USER CODE BEGIN MX_GPIO_Init_2 */
+
+  /* USER CODE END MX_GPIO_Init_2 */
+}
+
+/* USER CODE BEGIN 4 */
+
+/* USER CODE END 4 */
+
+/* USER CODE BEGIN Header_StartDefaultTask */
+/**
+  * @brief  Function implementing the defaultTask thread.
+  * @param  argument: Not used
+  * @retval None
+  */
+/* USER CODE END Header_StartDefaultTask */
 void StartDefaultTask(void *argument)
 {
-  for (;;)
+  /* USER CODE BEGIN 5 */
+  /* Infinite loop */
+  for(;;)
   {
     osDelay(1);
   }
+  /* USER CODE END 5 */
 }
 
-/* ==================== HAL 回调 ==================== */
-
-void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc)
-{
-  /* ADC DMA 循环模式, 每转换完成一次触发, 无需额外处理 */
-}
-
+/**
+  * @brief  This function is executed in case of error occurrence.
+  * @retval None
+  */
 void Error_Handler(void)
 {
+  /* USER CODE BEGIN Error_Handler_Debug */
+  /* User can add his own implementation to report the HAL error return state */
   __disable_irq();
-  while (1) { }
+  while (1)
+  {
+  }
+  /* USER CODE END Error_Handler_Debug */
 }
+#ifdef USE_FULL_ASSERT
+/**
+  * @brief  Reports the name of the source file and the source line number
+  *         where the assert_param error has occurred.
+  * @param  file: pointer to the source file name
+  * @param  line: assert_param error line source number
+  * @retval None
+  */
+void assert_failed(uint8_t *file, uint32_t line)
+{
+  /* USER CODE BEGIN 6 */
+  /* User can add his own implementation to report the file name and line number,
+     ex: printf("Wrong parameters value: file %s on line %d\r\n", file, line) */
+  /* USER CODE END 6 */
+}
+#endif /* USE_FULL_ASSERT */

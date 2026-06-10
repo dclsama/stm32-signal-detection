@@ -41,6 +41,11 @@ void CAN_Receiver_Start(void);
 void CAN_Receiver_ProcessRx(CAN_RxHeaderTypeDef *rx_header, uint8_t *rx_data);
 
 /**
+ * @brief  处理接收到的数据 (校验+打印), 在 Task_CAN_RX 中调用
+ */
+void CAN_Receiver_ProcessTask(void);
+
+/**
  * @brief  验证数据帧校验和
  * @return 0=校验通过, 1=校验失败
  */
