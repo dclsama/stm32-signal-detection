@@ -36,18 +36,19 @@
 
 /* ==================== 数据帧格式 (CAN ID 0x201, 8 Byte) ==================== */
 typedef struct __attribute__((packed)) {
-    int8_t   temp_int;          /* Byte 0: 温度整数部分 (°C) */
-    uint8_t  temp_dec;          /* Byte 1: 温度小数部分 (×10) */
-    uint8_t  humi_int;          /* Byte 2: 湿度整数部分 (%RH) */
-    uint8_t  humi_dec;          /* Byte 3: 湿度小数部分 (×10) */
-    uint16_t adc_value;         /* Byte 4-5: ADC 原始值 (0-4095) */
-    uint8_t  sensor_status;     /* Byte 6: bit0=DHT11_OK, bit1=ADC_OK */
+    int8_t   temp_int;          /* Byte 0: 温度整数 (°C) */
+    uint8_t  humi_int;          /* Byte 1: 湿度整数 (%RH) */
+    uint8_t  adc1;              /* Byte 2: ADC1 8-bit (0-255 = 0-3.3V) */
+    uint8_t  adc2;              /* Byte 3: ADC2 8-bit */
+    uint8_t  sensor_status;     /* Byte 4: bit0=DHT11_OK, bit1=ADC1_OK, bit2=ADC2_OK */
+    uint8_t  reserved[2];       /* Byte 5-6: 保留 */
     uint8_t  checksum;          /* Byte 7: XOR 校验 */
 } CAN_SensorFrame_t;
 
 /* 传感器状态位 */
 #define SENSOR_OK_DHT11         0x01
-#define SENSOR_OK_ADC           0x02
+#define SENSOR_OK_ADC1          0x02
+#define SENSOR_OK_ADC2          0x04
 
 /* ==================== 状态帧格式 (CAN ID 0x202, 2 Byte) ==================== */
 typedef struct __attribute__((packed)) {

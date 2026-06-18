@@ -184,4 +184,12 @@ void SysTick_Handler(void)
 
 /* USER CODE BEGIN 1 */
 
+/**
+  * @brief CAN1 RX0 中断服务函数
+  */
+void USB_LP_CAN1_RX0_IRQHandler(void)
+{
+    HAL_CAN_IRQHandler(&hcan);
+}
+
 /* USER CODE END 1 */

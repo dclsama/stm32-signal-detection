@@ -25,9 +25,9 @@ void SystemStatus_Init(void)
 
 void SystemStatus_Set(SystemStatus_t status, uint8_t error_code)
 {
-    /* 优先级: ERROR2 > ERROR1 > SAFE (通信故障最严重) */
-    if (current_status == SYSTEM_ERROR2 && status != SYSTEM_ERROR2) {
-        return;  /* ERROR2 不能降级 */
+    /* 告警锁存: ERROR2 只能被 Threshold_ClearAlarm (强制SAFE) 或自身恢复清除 */
+    if (current_status == SYSTEM_ERROR2 && status == SYSTEM_ERROR1) {
+        return;  /* ERROR2 不降级到 ERROR1 */
     }
 
     current_status = status;
@@ -84,8 +84,8 @@ void SystemStatus_Check(void)
         return;
     }
 
-    /* 如果之前是 ERROR1 但传感器已恢复 */
-    if (current_status == SYSTEM_ERROR1) {
+    /* 所有看门狗正常 → 恢复 SAFE (从任何 ERROR 恢复) */
+    if (current_status != SYSTEM_SAFE && (current_error == ERR_CAN_TIMEOUT || current_error == ERR_DHT11_TIMEOUT)) {
         SystemStatus_Set(SYSTEM_SAFE, ERR_NONE);
     }
 }
@@ -96,11 +96,11 @@ const char* SystemStatus_GetString(void)
         case SYSTEM_SAFE:
             return "SAFE";
         case SYSTEM_ERROR1:
-            if (current_error == ERR_TEMP_HIGH) return "ERROR1: Temp High";
+            if (current_error == ERR_TEMP_HIGH) return "ERROR1: Temp";
             return "ERROR1: Sensor";
         case SYSTEM_ERROR2:
-            if (current_error == ERR_VOLT_LOW)  return "ERROR2: Volt Low";
-            return "ERROR2: CAN";
+            if (current_error == ERR_VOLT_LOW)  return "ERROR2: Volt";
+            return "ERROR3: CAN";
         default:
             return "UNKNOWN";
     }

@@ -1,6 +1,6 @@
 /**
  * @file    can_protocol.c
- * @brief   CAN 自定义协议实现 — 数据打包/校验/调试打印
+ * @brief   CAN 自定义协议实现 — 2路ADC数据打包/校验/调试打印
  */
 
 #include "can_protocol.h"
@@ -18,21 +18,21 @@ void CAN_PackSensorFrame(CAN_SensorFrame_t *frame,
 
     if (dht11 && dht11->status == 0) {
         frame->temp_int  = (int8_t)dht11->temperature;
-        frame->temp_dec  = 0;              /* DHT11 小数固定为 0 */
         frame->humi_int  = dht11->humidity;
-        frame->humi_dec  = 0;
         frame->sensor_status |= SENSOR_OK_DHT11;
     } else {
-        /* DHT11 故障: 填充 0xFF 表示无效 */
         frame->temp_int  = (int8_t)0xFF;
-        frame->temp_dec  = 0xFF;
         frame->humi_int  = 0xFF;
-        frame->humi_dec  = 0xFF;
     }
 
-    if (adc && adc->status == 0) {
-        frame->adc_value = adc->raw_value;
-        frame->sensor_status |= SENSOR_OK_ADC;
+    /* 2 路 ADC: 12-bit → 8-bit 压缩 */
+    if (adc && adc->ch1.status == 0) {
+        frame->adc1 = (uint8_t)(adc->ch1.raw_value >> 4);
+        frame->sensor_status |= SENSOR_OK_ADC1;
+    }
+    if (adc && adc->ch2.status == 0) {
+        frame->adc2 = (uint8_t)(adc->ch2.raw_value >> 4);
+        frame->sensor_status |= SENSOR_OK_ADC2;
     }
 
     /* XOR 校验: Byte 0~6 的异或 */
@@ -66,9 +66,9 @@ void CAN_PrintSensorFrame(CAN_SensorFrame_t *frame)
     if (frame == NULL) return;
 
     printf("[CAN TX] ");
-    printf("Temp: %d.%dC  ", frame->temp_int, frame->temp_dec);
-    printf("Humi: %d.%d%%  ", frame->humi_int, frame->humi_dec);
-    printf("ADC: %d  ", frame->adc_value);
-    printf("Status: 0x%02X  ", frame->sensor_status);
+    printf("Temp: %dC  ", frame->temp_int);
+    printf("Humi: %d%%  ", frame->humi_int);
+    printf("ADC1: %d ADC2: %d  ", frame->adc1, frame->adc2);
+    printf("Stat: 0x%02X  ", frame->sensor_status);
     printf("XOR: 0x%02X\r\n", frame->checksum);
 }

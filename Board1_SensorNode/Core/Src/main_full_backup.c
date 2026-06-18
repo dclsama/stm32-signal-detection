@@ -72,8 +72,8 @@ const osThreadAttr_t defaultTask_attributes = {
 };
 /* USER CODE BEGIN PV */
 
-/* ADC DMA 循环缓冲区 (2通道 × 16采样 = 32) */
-uint16_t adc_dma_buffer[ADC_BUF_SIZE];
+/* ADC DMA 循环缓冲区 */
+uint16_t adc_dma_buffer[ADC_SAMPLE_COUNT];
 
 /* FreeRTOS 对象 */
 osMessageQueueId_t SensorDataQueue;
@@ -91,15 +91,15 @@ osThreadId_t TaskCANCMDHandle;
 /* CAN RX 信号量 — ISR 唤醒命令处理 */
 osSemaphoreId_t CANCmdSemaphore;
 
-/* stack_size 单位=字节 (CMSIS_V2). printf 实测需要 ~120w, 分配 384w=1536B */
+/* 任务属性 (栈大小调整, 加上 12KB heap 适配 20KB RAM) */
 const osThreadAttr_t task_attr_normal = {
-    .name = "Task", .priority = osPriorityNormal, .stack_size = 1536
+    .name = "Task", .priority = osPriorityNormal, .stack_size = 256
 };
 const osThreadAttr_t task_attr_high = {
-    .name = "Task", .priority = osPriorityAboveNormal, .stack_size = 1536
+    .name = "Task", .priority = osPriorityAboveNormal, .stack_size = 384
 };
 const osThreadAttr_t task_attr_low = {
-    .name = "Task", .priority = osPriorityLow, .stack_size = 1024
+    .name = "Task", .priority = osPriorityLow, .stack_size = 256
 };
 
 /* USER CODE END PV */
@@ -189,13 +189,15 @@ void Task_DHT11(void *argument)
         sensor_data.tick  = xTaskGetTickCount();
         osMessageQueuePut(SensorDataQueue, &sensor_data, 0, 0);
 
-        vTaskDelay(pdMS_TO_TICKS(1000));
+        vTaskDelay(pdMS_TO_TICKS(2000));
     }
 }
 
 void Task_ADC(void *argument)
 {
     ADC_Data_t adc_data;
+
+    ADC_DMA_Init();
 
     for (;;) {
         ADC_DMA_Read(&adc_data);
@@ -230,43 +232,29 @@ void Task_CAN_TX(void *argument)
             /* 发送 0x201 数据帧 */
             tx_header.StdId = CAN_ID_SENSOR_DATA;
             tx_header.DLC   = 8;
-            uint8_t tec = (CAN1->ESR >> 16) & 0xFF;
             if (HAL_CAN_AddTxMessage(&hcan, &tx_header,
                                      (uint8_t *)&data_frame,
                                      &tx_mailbox) == HAL_OK) {
                 CAN_PrintSensorFrame(&data_frame);
-                /* TEC 监测: 高=异常, 低=恢复 (均需 3 次确认) */
-                static uint8_t bad_cnt = 0, good_cnt = 0;
-                if (tec > 127) {
-                    good_cnt = 0;
-                    if (++bad_cnt >= 3)
-                        SystemStatus_Set(SYSTEM_ERROR2, ERR_CAN_TEC_HIGH);
-                } else {
-                    bad_cnt = 0;
-                    if (++good_cnt >= 3 &&
-                        SystemStatus_GetErrorCode() == ERR_CAN_TEC_HIGH)
-                        SystemStatus_Set(SYSTEM_SAFE, ERR_NONE);
-                }
+                SystemStatus_FeedCAN();  /* 发送成功 → 喂狗 */
             } else {
-                printf("[CAN TX] Mailbox Full! TEC=%u\r\n", tec);
+                printf("[CAN TX] Send Failed!\r\n");
             }
+
+            /* 发送 0x202 状态帧 */
+            SystemStatus_Check();
+            CAN_PackStatusFrame(&status_frame,
+                                SystemStatus_Get(),
+                                SystemStatus_GetErrorCode());
+            tx_header.StdId = CAN_ID_STATUS;
+            tx_header.DLC   = 2;
+            HAL_CAN_AddTxMessage(&hcan, &tx_header,
+                                 (uint8_t *)&status_frame, &tx_mailbox);
 
             osEventFlagsSet(SystemEventFlags, EVENT_CAN_TX_DONE);
         }
-
-        /* 始终喂 CAN 看门狗 (队列空≠CAN故障, 防止误报) */
+        /* Board1 是发送端, 每轮都喂 CAN 狗 */
         SystemStatus_FeedCAN();
-
-        /* 始终发送 0x202 状态帧 (Board2 心跳依据) */
-        CAN_PackStatusFrame(&status_frame,
-                            SystemStatus_Get(),
-                            SystemStatus_GetErrorCode());
-        printf("[CAN TX] Status: %s\r\n", SystemStatus_GetString());
-        tx_header.StdId = CAN_ID_STATUS;
-        tx_header.DLC   = 2;
-        HAL_CAN_AddTxMessage(&hcan, &tx_header,
-                             (uint8_t *)&status_frame, &tx_mailbox);
-
         vTaskDelay(pdMS_TO_TICKS(500));
     }
 }
@@ -299,8 +287,7 @@ void Task_RGB(void *argument)
                           SystemStatus_GetErrorCode() == ERR_CAN_TIMEOUT);
 
             if (!is_can_timeout) {
-                ThresholdResult_t thr = Threshold_Check(dht11.temperature,
-                                         adc.ch1.voltage, adc.ch2.voltage);
+                ThresholdResult_t thr = Threshold_Check(dht11.temperature, adc.voltage);
                 if (thr == THR_ERR_TEMP) {
                     SystemStatus_Set(SYSTEM_ERROR1, ERR_TEMP_HIGH);
                 } else if (thr == THR_ERR_VOLT) {
@@ -330,9 +317,7 @@ void Task_RGB(void *argument)
 }
 
 /**
- * @brief  Task_KeyScan — 每 10ms 扫描按键 (软件消抖), 处理模式切换
- *         PB1短按: 绿→红→绿呼吸 (3档循环)
- *         PB2长按: 绿灯常亮, 松手灯灭
+ * @brief  Task_KeyScan — 每 20ms 扫描按键, 处理模式切换
  */
 void Task_KeyScan(void *argument)
 {
@@ -344,141 +329,70 @@ void Task_KeyScan(void *argument)
     DHT11_Data_t dht11 = {0};
     ADC_Data_t   adc = {0};
     uint8_t sensor_ok = 0;
-    uint8_t key2_held = 0;   /* PB2 当前是否被按住 */
 
-    printf("[KeyScan] Started\r\n");
+    printf("[KeyScan] Started, GPIOB1=%d GPIOA2=%d\r\n",
+           HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_1),
+           HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_2));
 
     for (;;) {
-        /* === 读取当前状态 (一次, 全程一致) === */
-        SystemStatus_t st_now = SystemStatus_Get();
-        uint8_t err_now = SystemStatus_GetErrorCode();
-        uint8_t in_alarm = (st_now != SYSTEM_SAFE);
-
-        /* === 按键扫描 === */
-        KeyEvent_t ev = Key_Scan();
-        switch (ev) {
-            case KEY_EVENT_SHORT_1:
-                if (!in_alarm) {
-                    printf("[BTN] PB1 short → mode %d → ", RGB_ModeGet());
-                    RGB_ModeCycleNext();
-                    printf("%d\r\n", RGB_ModeGet());
-                }
-                break;
-
-            case KEY_EVENT_LONG_2:
-                printf("[BTN] BEFORE clear: %s\r\n", SystemStatus_GetString());
-                Threshold_ClearAlarm();
-                printf("[BTN] AFTER  clear: %s\r\n", SystemStatus_GetString());
-                st_now = SystemStatus_Get();
-                in_alarm = 0;
-                {
-                    CAN_TxHeaderTypeDef hdr = {0};
-                    CAN_StatusFrame_t sf;
-                    uint32_t mb;
-                    hdr.StdId = CAN_ID_STATUS; hdr.DLC = 2;
-                    hdr.IDE = CAN_ID_STD; hdr.RTR = CAN_RTR_DATA;
-                    CAN_PackStatusFrame(&sf, SYSTEM_SAFE, ERR_NONE);
-                    if (HAL_CAN_AddTxMessage(&hcan, &hdr, (uint8_t*)&sf, &mb) != HAL_OK)
-                        printf("[BTN] WARN: immediate tx failed!\r\n");
-                    else
-                        printf("[BTN] Immediate SAFE frame sent OK\r\n");
-                }
-                /* fall through */
-            case KEY_EVENT_PRESS_2:
-                if (!key2_held) {
-                    printf("[BTN] PA2 hold → SAFE\r\n");
-                    RGB_ModeKey2Control(1);
-                    key2_held = 1;
-                }
-                break;
-
-            case KEY_EVENT_RELEASE_2:
-                printf("[BTN] PA2 release → OFF\r\n");
-                RGB_ModeKey2Control(0);
-                key2_held = 0;
-                RGB_ModeSet(MODE_OFF);
-                break;
-
-            default:
-                break;
+        /* 按键 PB1 */
+        if (HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_1) == GPIO_PIN_RESET) {
+            printf("[BTN] PB1 pressed! Mode: %d → ", RGB_ModeGet());
+            RGB_ModeCycleNext();
+            printf("%d\r\n", RGB_ModeGet());
+            vTaskDelay(pdMS_TO_TICKS(300));
+            continue;
+        }
+        /* 按键 PA2 */
+        if (HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_2) == GPIO_PIN_RESET) {
+            printf("[BTN] PA2 pressed → ClearAlarm\r\n");
+            Threshold_ClearAlarm();
+            vTaskDelay(pdMS_TO_TICKS(300));
+            continue;
         }
 
-        /* === 每 500ms: 检查 + 阈值 (PA2 按住时全部跳过) === */
         tick++;
-        if (tick % 50 == 0) {
-            if (!key2_held) {
-                SystemStatus_Check();
-                if (osMessageQueueGet(SensorDataQueue, &dht11, NULL, 0) == osOK) {
-                    if (dht11.status == 0) sensor_ok = 1;
-                }
-                ADC_DMA_Read(&adc);
-                /* 电压检测不依赖 DHT11, 上电即可工作 */
-                ThresholdResult_t thr = Threshold_Check(dht11.temperature,
-                                         adc.ch1.voltage, adc.ch2.voltage);
-                if (thr == THR_ERR_TEMP) {
+        /* 每 500ms: 系统+阈值检查 */
+        if (tick % 25 == 0) {
+            SystemStatus_Check();
+            if (osMessageQueueGet(SensorDataQueue, &dht11, NULL, 0) == osOK) {
+                if (dht11.status == 0) sensor_ok = 1;
+            }
+            ADC_DMA_Read(&adc);
+            if (sensor_ok) {
+                ThresholdResult_t thr = Threshold_Check(dht11.temperature, adc.voltage);
+                if (thr == THR_ERR_TEMP)
                     SystemStatus_Set(SYSTEM_ERROR1, ERR_TEMP_HIGH);
-                } else if (thr == THR_ERR_VOLT) {
+                else if (thr == THR_ERR_VOLT)
                     SystemStatus_Set(SYSTEM_ERROR2, ERR_VOLT_LOW);
-                } else if (SystemStatus_GetErrorCode() == ERR_TEMP_HIGH ||
-                           SystemStatus_GetErrorCode() == ERR_VOLT_LOW) {
+                else if (SystemStatus_Get() == SYSTEM_ERROR1)
                     SystemStatus_Set(SYSTEM_SAFE, ERR_NONE);
-                }
-                st_now = SystemStatus_Get();    /* 刷新 */
-                err_now = SystemStatus_GetErrorCode();
-                in_alarm = (st_now != SYSTEM_SAFE);
             }
+            SystemStatus_t st = SystemStatus_Get();
+            if (st == SYSTEM_ERROR1)      RGB_SetStatus(1);
+            else if (st == SYSTEM_ERROR2) RGB_SetStatus(2);
         }
 
-        /* === 每 5s 打印 (含滤波对比) === */
-        if (tick % 500 == 0) {
-            uint32_t tsr = CAN1->TSR;
-            uint32_t esr = CAN1->ESR;
-            /* 单次原始采样 (无滤波, DMA 缓冲区第一个数据) */
-            uint16_t raw_single = ADC_DMA_ReadRaw(0);
-            float    raw_v      = ADC_ToVoltage(raw_single);
-            /* 16-sample 均值滤波 (ADC_DMA_Read 输出) */
-            float    mean_v     = adc.ch1.voltage;
-            /* EMA 滤波 (对均值进一步平滑) */
-            float    ema_v      = ADC_EMA_Filter(mean_v, 0);
-            printf("[INFO] t=%lus mode=%d status=%s "
-                   "T=%dC | "
-                   "CH1 raw=%u.%02uV avg=%u.%02uV ema=%u.%02uV | "
-                   "CAN TSR=%04lX TEC=%lu REC=%lu\r\n",
+        /* 每 5s 打印一次状态 (tick=250 = 5s) */
+        if (tick % 250 == 0) {
+            SystemStatus_t st = SystemStatus_Get();
+            printf("[INFO] t=%lus mode=%d status=%s GPIOB1=%d GPIOA2=%d "
+                   "T=%dC V=%.2fV ok=%d heap_free=%lu\r\n",
                    (uint32_t)(xTaskGetTickCount() / 1000),
-                   RGB_ModeGet(), SystemStatus_GetString(),
-                   dht11.temperature,
-                   (unsigned int)raw_v,
-                   (unsigned int)(raw_v * 100.0f) % 100,
-                   (unsigned int)mean_v,
-                   (unsigned int)(mean_v * 100.0f) % 100,
-                   (unsigned int)ema_v,
-                   (unsigned int)(ema_v * 100.0f) % 100,
-                   (unsigned long)(tsr & 0xFFFF),
-                   (unsigned long)((esr >> 16) & 0xFF),
-                   (unsigned long)((esr >> 24) & 0xFF));
+                   RGB_ModeGet(),
+                   SystemStatus_GetString(),
+                   HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_1),
+                   HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_2),
+                   dht11.temperature, (double)adc.voltage,
+                   sensor_ok,
+                   xPortGetFreeHeapSize());
         }
 
-        /* === RGB 控制 (PA2 按住时绿灯优先) === */
-        static uint8_t was_alarm = 0;
-        if (key2_held) {
-            was_alarm = 0;
-        } else if (in_alarm) {
-            was_alarm = 1;
-            if (st_now == SYSTEM_ERROR1)
-                RGB_SetColor(999, 0, 0);
-            else if (err_now == ERR_CAN_TIMEOUT || err_now == ERR_CAN_TEC_HIGH)
-                RGB_SetColor(0, 0, 999);
-            else
-                RGB_AlarmRedBreatheTick();
-        } else {
-            if (was_alarm) {
-                RGB_ModeSet(RGB_ModeGet());  /* 刚从告警恢复: 立即恢复模式色 */
-                was_alarm = 0;
-            }
+        /* 呼吸 */
+        if (SystemStatus_Get() == SYSTEM_SAFE)
             RGB_ModeBreatheTick();
-        }
 
-        vTaskDelay(pdMS_TO_TICKS(10));
+        vTaskDelay(pdMS_TO_TICKS(20));
     }
 }
 
@@ -530,7 +444,7 @@ void Task_FlashLog(void *argument)
             entry.timestamp   = xTaskGetTickCount() / 1000;
             entry.temperature = sensor_data.dht11.temperature;
             entry.humidity    = sensor_data.dht11.humidity;
-            entry.adc_value   = adc.ch1.raw_value;
+            entry.adc_value   = adc.raw_value;
             entry.status      = sensor_data.dht11.status;
 
             W25Q64_LogAppend(&entry);
@@ -573,8 +487,6 @@ int main(void)
   MX_GPIO_Init();
   MX_DMA_Init();
   MX_ADC1_Init();
-  ADC_DMA_Init();           /* 在调度器启动前开始 DMA */
-  ADC_EMA_Init();           /* EMA 滤波器初始化 */
   MX_TIM3_Init();
   MX_USART1_UART_Init();
   MX_CAN_Init();
@@ -729,18 +641,19 @@ static void MX_ADC1_Init(void)
   /** Common config
   */
   hadc1.Instance = ADC1;
-  hadc1.Init.ScanConvMode = ADC_SCAN_ENABLE;       /* 扫描模式: CH1→CH3 */
+  hadc1.Init.ScanConvMode = ADC_SCAN_DISABLE;
   hadc1.Init.ContinuousConvMode = ENABLE;
   hadc1.Init.DiscontinuousConvMode = DISABLE;
   hadc1.Init.ExternalTrigConv = ADC_SOFTWARE_START;
   hadc1.Init.DataAlign = ADC_DATAALIGN_RIGHT;
-  hadc1.Init.NbrOfConversion = 2;                  /* 2 通道 */
+  hadc1.Init.NbrOfConversion = 1;
   if (HAL_ADC_Init(&hadc1) != HAL_OK)
   {
     Error_Handler();
   }
 
-  /** CH1: PA1 = ADC_IN1 */
+  /** Configure Regular Channel
+  */
   sConfig.Channel = ADC_CHANNEL_1;
   sConfig.Rank = ADC_REGULAR_RANK_1;
   sConfig.SamplingTime = ADC_SAMPLETIME_1CYCLE_5;
@@ -748,16 +661,6 @@ static void MX_ADC1_Init(void)
   {
     Error_Handler();
   }
-
-  /** CH2: PA3 = ADC_IN3 */
-  sConfig.Channel = ADC_CHANNEL_3;
-  sConfig.Rank = ADC_REGULAR_RANK_2;
-  sConfig.SamplingTime = ADC_SAMPLETIME_1CYCLE_5;
-  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
-  {
-    Error_Handler();
-  }
-
   /* USER CODE BEGIN ADC1_Init 2 */
 
   /* USER CODE END ADC1_Init 2 */
@@ -781,7 +684,7 @@ static void MX_CAN_Init(void)
   /* USER CODE END CAN_Init 1 */
   hcan.Instance = CAN1;
   hcan.Init.Prescaler = 9;
-  hcan.Init.Mode = CAN_MODE_NORMAL;
+  hcan.Init.Mode = CAN_MODE_LOOPBACK;
   hcan.Init.SyncJumpWidth = CAN_SJW_1TQ;
   hcan.Init.TimeSeg1 = CAN_BS1_5TQ;
   hcan.Init.TimeSeg2 = CAN_BS2_2TQ;
@@ -965,16 +868,10 @@ static void MX_GPIO_Init(void)
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOB, GPIO_PIN_8, GPIO_PIN_RESET);
 
-  /*Configure GPIO pin : PA2 (按键2) */
+  /*Configure GPIO pin : PA2 */
   GPIO_InitStruct.Pin = GPIO_PIN_2;
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
   GPIO_InitStruct.Pull = GPIO_PULLUP;
-  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
-
-  /*Configure GPIO pin : PA3 (ADC_IN3 模拟输入) */
-  GPIO_InitStruct.Pin = GPIO_PIN_3;
-  GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
   /*Configure GPIO pins : PB1 PB2 */

@@ -2,7 +2,7 @@
  * @file    dht11.c
  * @brief   DHT11 温湿度传感器驱动实现
  * @note    使用微秒级延时 (SysTick 或 DWT)，读取期间需关闭调度器
- *          在 FreeRTOS 中调用时需要用 vTaskSuspendAll() 保护时序
+ *          在 FreeRTOS 中调用时需要用 taskENTER_CRITICAL() 保护时序
  */
 
 #include "dht11.h"
@@ -82,7 +82,7 @@ uint8_t DHT11_Read(DHT11_Data_t *data)
     if (data == NULL) return 1;
 
     /* ---- 在 FreeRTOS 中保护时序 ---- */
-    vTaskSuspendAll();
+    taskENTER_CRITICAL();
 
     /* ---- 步骤 1: 主机发送起始信号 ---- */
     DHT11_SetOutput();
@@ -98,7 +98,7 @@ uint8_t DHT11_Read(DHT11_Data_t *data)
     timeout = DHT11_TIMEOUT;
     while (DHT11_DQ_READ() == GPIO_PIN_SET) {
         if (--timeout == 0) {
-            xTaskResumeAll();
+            taskEXIT_CRITICAL();
             data->status = 1;  /* 超时 */
             return 1;
         }
@@ -109,7 +109,7 @@ uint8_t DHT11_Read(DHT11_Data_t *data)
     timeout = DHT11_TIMEOUT;
     while (DHT11_DQ_READ() == GPIO_PIN_RESET) {
         if (--timeout == 0) {
-            xTaskResumeAll();
+            taskEXIT_CRITICAL();
             data->status = 1;
             return 1;
         }
@@ -118,7 +118,7 @@ uint8_t DHT11_Read(DHT11_Data_t *data)
     timeout = DHT11_TIMEOUT;
     while (DHT11_DQ_READ() == GPIO_PIN_SET) {
         if (--timeout == 0) {
-            xTaskResumeAll();
+            taskEXIT_CRITICAL();
             data->status = 1;
             return 1;
         }
@@ -132,7 +132,7 @@ uint8_t DHT11_Read(DHT11_Data_t *data)
             timeout = DHT11_TIMEOUT;
             while (DHT11_DQ_READ() == GPIO_PIN_RESET) {
                 if (--timeout == 0) {
-                    xTaskResumeAll();
+                    taskEXIT_CRITICAL();
                     data->status = 1;
                     return 1;
                 }
@@ -151,7 +151,7 @@ uint8_t DHT11_Read(DHT11_Data_t *data)
             timeout = DHT11_TIMEOUT;
             while (DHT11_DQ_READ() == GPIO_PIN_SET) {
                 if (--timeout == 0) {
-                    xTaskResumeAll();
+                    taskEXIT_CRITICAL();
                     data->status = 1;
                     return 1;
                 }
@@ -160,7 +160,7 @@ uint8_t DHT11_Read(DHT11_Data_t *data)
         }
     }
 
-    xTaskResumeAll();          /* 恢复调度器 */
+    taskEXIT_CRITICAL();          /* 恢复调度器 */
 
     /* ---- 步骤 4: 校验 ---- */
     uint8_t checksum = buf[0] + buf[1] + buf[2] + buf[3];

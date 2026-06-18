@@ -21,13 +21,14 @@ typedef enum {
 #define ERR_DHT11_TIMEOUT       0x01
 #define ERR_DHT11_CHECKSUM      0x02
 #define ERR_ADC_FAIL            0x03
-#define ERR_TEMP_HIGH           0x04
-#define ERR_VOLT_LOW            0x05
+#define ERR_TEMP_HIGH           0x04  /* 温度超阈值 */
+#define ERR_VOLT_LOW            0x05  /* 电压低于阈值 */
 #define ERR_CAN_TIMEOUT         0x10
 #define ERR_CAN_BUSOFF          0x11
+#define ERR_CAN_TEC_HIGH        0x12  /* TEC>127 硬件错误 */
 
 /* ==================== 配置 ==================== */
-#define CAN_RX_TIMEOUT_MS       2000  /* CAN 接收超时 (ms) → 触发 ERROR2 */
+#define CAN_RX_TIMEOUT_MS       5000  /* CAN 接收超时 (ms) → 容忍偶发丢帧 */
 #define SENSOR_TIMEOUT_MS       5000  /* 传感器超时 (ms) → 触发 ERROR1 */
 
 /* ==================== API 函数 ==================== */

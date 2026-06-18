@@ -14,11 +14,26 @@ static uint8_t cmd_pending = 0;
 
 void CAN_Command_Init(void)
 {
-    /* 过滤器: 仅接收 0x301 */
     CAN_FilterTypeDef filter = {0};
-    filter.FilterBank = 1;              /* Board1 用 Bank 1 (0 给 TX) */
-    filter.FilterMode = CAN_FILTERMODE_IDLIST;
+
+    /* Bank 0: 拒绝所有帧
+     * STM32 CAN 掩码: 1=必须匹配, 0=不关心
+     * mask=0xFFFF 全1 + ID=0x0000 → 仅匹配不可能出现的 ID0 → 拒绝所有 */
+    filter.FilterBank = 0;
+    filter.FilterMode = CAN_FILTERMODE_IDMASK;
     filter.FilterScale = CAN_FILTERSCALE_32BIT;
+    filter.FilterIdHigh = 0;
+    filter.FilterIdLow  = 0;
+    filter.FilterMaskIdHigh = 0xFFFF;   /* 1=必须匹配 → 精确匹配 ID=0 → 拒绝所有 */
+    filter.FilterMaskIdLow  = 0xFFFF;
+    filter.FilterFIFOAssignment = CAN_FILTER_FIFO0;
+    filter.FilterActivation = ENABLE;
+    HAL_CAN_ConfigFilter(&hcan, &filter);
+
+    /* Bank 1: 仅接收 0x301 (16-bit ID 列表模式) */
+    filter.FilterBank = 1;
+    filter.FilterMode = CAN_FILTERMODE_IDLIST;
+    filter.FilterScale = CAN_FILTERSCALE_16BIT;
     filter.FilterIdHigh = (CAN_ID_ACK << 5);
     filter.FilterIdLow  = (CAN_ID_ACK << 5);
     filter.FilterMaskIdHigh = 0;

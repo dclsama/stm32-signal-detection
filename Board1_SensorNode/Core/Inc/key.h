@@ -14,8 +14,8 @@
 #define KEY1_GPIO_PORT        GPIOB
 #define KEY1_GPIO_PIN         GPIO_PIN_1
 
-#define KEY2_GPIO_PORT        GPIOB
-#define KEY2_GPIO_PIN         GPIO_PIN_2
+#define KEY2_GPIO_PORT        GPIOA
+#define KEY2_GPIO_PIN         GPIO_PIN_2      /* PA2 (PB2=BOOT1 不可用作GPIO) */
 
 /* 消抖参数 */
 #define KEY_SCAN_MS           10      /* 扫描周期 */

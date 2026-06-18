@@ -135,10 +135,13 @@ KeyEvent_t Key_Scan(void)
 
     e2 = Key_Process(&key2, 2);
 
-    /* 按键2 持续按下报告 */
+    /* 优先返回实际事件 (LONG_2 / RELEASE_2) */
+    if (e2 != KEY_EVENT_NONE) return e2;
+
+    /* 持续按下报告 */
     if (key2.state == KS_PRESSED) {
         return KEY_EVENT_PRESS_2;
     }
 
-    return e2;
+    return KEY_EVENT_NONE;
 }

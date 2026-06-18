@@ -7,6 +7,10 @@
 
 void RGB_Init(void)
 {
+    /* TIM3 partial remap: CH1→PB4, CH2→PB5 (CubeMX有时漏配) */
+    __HAL_RCC_AFIO_CLK_ENABLE();
+    __HAL_AFIO_REMAP_TIM3_PARTIAL();
+
     /* 启动 PWM 输出 */
     HAL_TIM_PWM_Start(RGB_TIM_HANDLE, RGB_RED_CHANNEL);
     HAL_TIM_PWM_Start(RGB_TIM_HANDLE, RGB_GREEN_CHANNEL);
@@ -26,14 +30,12 @@ void RGB_SetColor(uint16_t r, uint16_t g, uint16_t b)
 void RGB_SetStatus(uint8_t status)
 {
     switch (status) {
-        case 0:  /* SAFE */
-            RGB_SetColor(0, 999, 0);     /* 绿色 */
+        case 0:  /* SAFE — 绿色 */
+            RGB_SetColor(0, 999, 0);
             break;
-        case 1:  /* ERROR1 — 传感器故障 */
-            RGB_SetColor(999, 999, 0);   /* 黄色 */
-            break;
-        case 2:  /* ERROR2 — CAN通信故障 */
-            RGB_SetColor(999, 0, 0);     /* 红色 */
+        case 1:  /* ERROR1 — 红色 */
+        case 2:  /* ERROR2 — 红色 */
+            RGB_SetColor(999, 0, 0);
             break;
         default:
             RGB_Off();

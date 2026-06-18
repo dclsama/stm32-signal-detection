@@ -15,8 +15,9 @@
 typedef struct {
     CAN_SensorFrame_t sensor;    /* 最新传感器数据帧 */
     CAN_StatusFrame_t status;    /* 最新状态帧 */
-    uint8_t sensor_updated;      /* 数据帧已更新标志 */
-    uint8_t status_updated;      /* 状态帧已更新标志 */
+    uint8_t  sensor_updated;     /* 数据帧已更新标志 */
+    uint8_t  status_updated;     /* 状态帧已更新标志 */
+    uint32_t rx_count;           /* CAN 帧接收计数 (用于 OLED 诊断) */
 } CAN_ReceivedData_t;
 
 extern CAN_ReceivedData_t g_can_rx_data;

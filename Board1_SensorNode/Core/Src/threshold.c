@@ -1,6 +1,6 @@
 /**
  * @file    threshold.c
- * @brief   阈值管理实现
+ * @brief   阈值管理 — 温度 + 2路电压告警
  */
 
 #include "threshold.h"
@@ -20,19 +20,19 @@ void Threshold_Init(void)
     config.enabled   = 1;
 }
 
-ThresholdResult_t Threshold_Check(int8_t temp_c, float volt_v)
+ThresholdResult_t Threshold_Check(int8_t temp_c, float volt1_v, float volt2_v)
 {
     if (!config.enabled) return THR_OK;
-
-    uint16_t volt_x100 = (uint16_t)(volt_v * 100.0f);
 
     /* ERROR1: 温度超限 */
     if (temp_c > config.temp_high) {
         return THR_ERR_TEMP;
     }
 
-    /* ERROR2: 电压过低 */
-    if (volt_x100 < config.volt_low) {
+    /* ERROR2: 任何一路电压低于阈值 */
+    uint16_t v1 = (uint16_t)(volt1_v * 100.0f);
+    uint16_t v2 = (uint16_t)(volt2_v * 100.0f);
+    if (v1 < config.volt_low || v2 < config.volt_low) {
         return THR_ERR_VOLT;
     }
 
@@ -59,7 +59,6 @@ void Threshold_SetVolt(uint16_t volt_x100)
 
 void Threshold_ClearAlarm(void)
 {
-    /* 清除告警, 恢复 SAFE */
     SystemStatus_Set(SYSTEM_SAFE, ERR_NONE);
     printf("[Alarm] Cleared → SAFE\r\n");
 }

@@ -46,10 +46,11 @@ RGB_Mode_t RGB_ModeGet(void);
  */
 void RGB_ModeBreatheTick(void);
 
-/**
- * @brief  按键2长按/释放 — 绿灯常亮
- * @param  pressed  1=按下亮, 0=释放灭
- */
 void RGB_ModeKey2Control(uint8_t pressed);
+
+/**
+ * @brief  红色呼吸灯 tick (告警用, 与绿色呼吸共用查表)
+ */
+void RGB_AlarmRedBreatheTick(void);
 
 #endif /* __RGB_MODES_H__ */

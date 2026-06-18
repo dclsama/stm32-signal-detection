@@ -18,16 +18,21 @@ static uint8_t irq_status_pending = 0;
 void CAN_Receiver_Init(void)
 {
     CAN_FilterTypeDef filter = {0};
+
+    /* Bank 0: 仅接收 0x201 和 0x202 (16-bit ID List 模式)
+     * 注意: STM32 CAN 掩码位=1 表示"必须匹配", =0 表示"不关心" */
     filter.FilterBank = 0;
     filter.FilterMode = CAN_FILTERMODE_IDLIST;
-    filter.FilterScale = CAN_FILTERSCALE_32BIT;
-    filter.FilterIdHigh = (CAN_ID_SENSOR_DATA << 5);
-    filter.FilterIdLow  = (CAN_ID_STATUS << 5);
+    filter.FilterScale = CAN_FILTERSCALE_16BIT;
+    filter.FilterIdHigh = (CAN_ID_SENSOR_DATA << 5);  /* 0x201 */
+    filter.FilterIdLow  = (CAN_ID_STATUS << 5);       /* 0x202 */
     filter.FilterMaskIdHigh = 0;
     filter.FilterMaskIdLow  = 0;
     filter.FilterFIFOAssignment = CAN_FILTER_FIFO0;
     filter.FilterActivation = ENABLE;
     HAL_CAN_ConfigFilter(&hcan, &filter);
+
+    /* Bank 1: 保留，不使能 (仅 Bank0 就够了) */
 
     memset(&g_can_rx_data, 0, sizeof(g_can_rx_data));
     irq_sensor_pending = 0;
@@ -79,12 +84,13 @@ void CAN_Receiver_ProcessTask(void)
         memcpy(&g_can_rx_data.sensor, &irq_sensor_buf,
                sizeof(CAN_SensorFrame_t));
         g_can_rx_data.sensor_updated = 1;
+        g_can_rx_data.rx_count++;       /* 帧计数 */
 
-        printf("[CAN RX] T:%dC H:%d%% ADC:%d Stat:0x%02X\r\n",
+        printf("[CAN RX] T:%dC H:%d%% ADC1:%d ADC2:%d\r\n",
                irq_sensor_buf.temp_int,
                irq_sensor_buf.humi_int,
-               irq_sensor_buf.adc_value,
-               irq_sensor_buf.sensor_status);
+               irq_sensor_buf.adc1,
+               irq_sensor_buf.adc2);
     }
 
     if (irq_status_pending) {
@@ -92,6 +98,7 @@ void CAN_Receiver_ProcessTask(void)
 
         g_can_rx_data.status = irq_status_buf;
         g_can_rx_data.status_updated = 1;
+        g_can_rx_data.rx_count++;       /* 帧计数 */
 
         printf("[CAN RX] Status: %d Error: 0x%02X\r\n",
                irq_status_buf.system_status,
