@@ -58,8 +58,9 @@ void CAN_Receiver_ProcessRx(CAN_RxHeaderTypeDef *rx_header, uint8_t *rx_data)
             break;
 
         case CAN_ID_STATUS:
-            irq_status_buf.system_status = rx_data[0];
-            irq_status_buf.error_code    = rx_data[1];
+            irq_status_buf.system_status  = rx_data[0];
+            irq_status_buf.error_code     = rx_data[1];
+            irq_status_buf.temp_threshold = (int16_t)(rx_data[2] | ((uint16_t)rx_data[3] << 8));
             irq_status_pending = 1;
             break;
 

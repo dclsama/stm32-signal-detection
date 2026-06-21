@@ -49,6 +49,12 @@ void RGB_ModeBreatheTick(void);
 void RGB_ModeKey2Control(uint8_t pressed);
 
 /**
+ * @brief  查询 KEY2 是否正在覆盖 RGB (按住状态)
+ * @return 1=KEY2 按住中, 0=正常
+ */
+uint8_t RGB_IsKey2Override(void);
+
+/**
  * @brief  红色呼吸灯 tick (告警用, 与绿色呼吸共用查表)
  */
 void RGB_AlarmRedBreatheTick(void);

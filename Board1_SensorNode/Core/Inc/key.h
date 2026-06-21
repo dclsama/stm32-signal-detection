@@ -29,6 +29,7 @@ typedef enum {
     KEY_EVENT_LONG_2      = 2,       /* 按键2 长按 */
     KEY_EVENT_PRESS_2     = 3,       /* 按键2 按下 (持续) */
     KEY_EVENT_RELEASE_2   = 4,       /* 按键2 释放 */
+    KEY_EVENT_SHORT_2     = 5,       /* 按键2 短按 (<1s) */
 } KeyEvent_t;
 
 /* ==================== API 函数 ==================== */

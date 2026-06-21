@@ -91,6 +91,9 @@ osThreadId_t TaskCANCMDHandle;
 /* CAN RX 信号量 — ISR 唤醒命令处理 */
 osSemaphoreId_t CANCmdSemaphore;
 
+/* Flash SPI 互斥锁 (保护 W25Q64 跨任务写入) */
+osMutexId_t FlashMutex;
+
 /* stack_size 单位=字节 (CMSIS_V2). printf 实测需要 ~120w, 分配 384w=1536B */
 const osThreadAttr_t task_attr_normal = {
     .name = "Task", .priority = osPriorityNormal, .stack_size = 1536
@@ -260,10 +263,13 @@ void Task_CAN_TX(void *argument)
         /* 始终发送 0x202 状态帧 (Board2 心跳依据) */
         CAN_PackStatusFrame(&status_frame,
                             SystemStatus_Get(),
-                            SystemStatus_GetErrorCode());
-        printf("[CAN TX] Status: %s\r\n", SystemStatus_GetString());
+                            SystemStatus_GetErrorCode(),
+                            Threshold_GetConfig()->temp_high);
+        printf("[CAN TX] Status: %s ThrT:%dC\r\n",
+               SystemStatus_GetString(),
+               Threshold_GetConfig()->temp_high);
         tx_header.StdId = CAN_ID_STATUS;
-        tx_header.DLC   = 2;
+        tx_header.DLC   = 4;
         HAL_CAN_AddTxMessage(&hcan, &tx_header,
                              (uint8_t *)&status_frame, &tx_mailbox);
 
@@ -284,45 +290,47 @@ void Task_RGB(void *argument)
     for (;;) {
         SystemStatus_Check();
 
-        /* ==== 阈值检查 ==== */
+        /* ==== 阈值检查 (KEY2 按住时跳过) ==== */
         if (osMessageQueueGet(SensorDataQueue, &sensor_data, NULL, 0) == osOK) {
             dht11 = sensor_data.dht11;
             sensor_ready = 1;
         }
         ADC_DMA_Read(&adc);
 
-        /* 只有传感器就绪时才做阈值检查 */
-        if (sensor_ready && dht11.status == 0) {
-            SystemStatus_t st = SystemStatus_Get();
-            /* CAN 超时(ERROR2+ERR_CAN_TIMEOUT)不覆盖 */
-            uint8_t is_can_timeout = (st == SYSTEM_ERROR2 &&
-                          SystemStatus_GetErrorCode() == ERR_CAN_TIMEOUT);
+        /* KEY2 按住时: 强制 SAFE, 跳过阈值判断 */
+        if (!RGB_IsKey2Override()) {
+            if (sensor_ready && dht11.status == 0) {
+                SystemStatus_t st = SystemStatus_Get();
+                uint8_t is_can_timeout = (st == SYSTEM_ERROR2 &&
+                              SystemStatus_GetErrorCode() == ERR_CAN_TIMEOUT);
 
-            if (!is_can_timeout) {
-                ThresholdResult_t thr = Threshold_Check(dht11.temperature,
-                                         adc.ch1.voltage, adc.ch2.voltage);
-                if (thr == THR_ERR_TEMP) {
-                    SystemStatus_Set(SYSTEM_ERROR1, ERR_TEMP_HIGH);
-                } else if (thr == THR_ERR_VOLT) {
-                    SystemStatus_Set(SYSTEM_ERROR2, ERR_VOLT_LOW);
-                } else {
-                    /* 传感器正常 → 恢复 SAFE (仅当之前是阈值告警时) */
-                    if (st != SYSTEM_SAFE && st != SYSTEM_ERROR2) {
-                        SystemStatus_Set(SYSTEM_SAFE, ERR_NONE);
+                if (!is_can_timeout) {
+                    ThresholdResult_t thr = Threshold_Check(dht11.temperature,
+                                             adc.ch1.voltage, adc.ch2.voltage);
+                    if (thr == THR_ERR_TEMP) {
+                        SystemStatus_Set(SYSTEM_ERROR1, ERR_TEMP_HIGH);
+                    } else if (thr == THR_ERR_VOLT) {
+                        SystemStatus_Set(SYSTEM_ERROR2, ERR_VOLT_LOW);
+                    } else {
+                        if (st != SYSTEM_SAFE && st != SYSTEM_ERROR2) {
+                            SystemStatus_Set(SYSTEM_SAFE, ERR_NONE);
+                        }
                     }
                 }
             }
         }
 
-        /* ==== RGB 控制 ==== */
-        SystemStatus_t sys_status = SystemStatus_Get();
+        /* ==== RGB 控制 (KEY2 按住时跳过, 由 RGB_ModeKey2Control 接管) ==== */
+        if (!RGB_IsKey2Override()) {
+            SystemStatus_t sys_status = SystemStatus_Get();
 
-        if (sys_status == SYSTEM_ERROR1) {
-            RGB_SetStatus(1);  /* 黄 */
-        } else if (sys_status == SYSTEM_ERROR2) {
-            RGB_SetStatus(2);  /* 红 */
-        } else {
-            RGB_ModeBreatheTick();
+            if (sys_status == SYSTEM_ERROR1) {
+                RGB_SetStatus(1);  /* 黄 */
+            } else if (sys_status == SYSTEM_ERROR2) {
+                RGB_SetStatus(2);  /* 红 */
+            } else {
+                RGB_ModeBreatheTick();
+            }
         }
 
         vTaskDelay(pdMS_TO_TICKS(20));
@@ -332,7 +340,8 @@ void Task_RGB(void *argument)
 /**
  * @brief  Task_KeyScan — 每 10ms 扫描按键 (软件消抖), 处理模式切换
  *         PB1短按: 绿→红→绿呼吸 (3档循环)
- *         PB2长按: 绿灯常亮, 松手灯灭
+ *         PA2短按: 温度阈值 +1°C 并保存到 Flash
+ *         PA2长按: 重置温度阈值为 30°C 并保存到 Flash + 清告警 + 绿灯常亮
  */
 void Task_KeyScan(void *argument)
 {
@@ -365,7 +374,19 @@ void Task_KeyScan(void *argument)
                 }
                 break;
 
+            case KEY_EVENT_SHORT_2:
+                key2_held = 0;
+                RGB_ModeKey2Control(0);
+                Threshold_IncTemp();
+                Threshold_SaveToFlash();
+                printf("[BTN] KEY2 short → temp+1, saved: %d C\r\n",
+                       Threshold_GetConfig()->temp_high);
+                break;
+
             case KEY_EVENT_LONG_2:
+                Threshold_ResetTemp();
+                Threshold_SaveToFlash();
+                printf("[BTN] KEY2 long → temp reset to 30 C, saved\r\n");
                 printf("[BTN] BEFORE clear: %s\r\n", SystemStatus_GetString());
                 Threshold_ClearAlarm();
                 printf("[BTN] AFTER  clear: %s\r\n", SystemStatus_GetString());
@@ -375,9 +396,10 @@ void Task_KeyScan(void *argument)
                     CAN_TxHeaderTypeDef hdr = {0};
                     CAN_StatusFrame_t sf;
                     uint32_t mb;
-                    hdr.StdId = CAN_ID_STATUS; hdr.DLC = 2;
+                    hdr.StdId = CAN_ID_STATUS; hdr.DLC = 4;
                     hdr.IDE = CAN_ID_STD; hdr.RTR = CAN_RTR_DATA;
-                    CAN_PackStatusFrame(&sf, SYSTEM_SAFE, ERR_NONE);
+                    CAN_PackStatusFrame(&sf, SYSTEM_SAFE, ERR_NONE,
+                                       Threshold_GetConfig()->temp_high);
                     if (HAL_CAN_AddTxMessage(&hcan, &hdr, (uint8_t*)&sf, &mb) != HAL_OK)
                         printf("[BTN] WARN: immediate tx failed!\r\n");
                     else
@@ -506,9 +528,11 @@ void Task_FlashLog(void *argument)
     FlashLogEntry_t entry;
     SensorData_t sensor_data;
     ADC_Data_t adc;
+    ThresholdConfig_t *thr_cfg;
 
     W25Q64_Init();
 
+    /* 读取并打印 JEDEC ID */
     W25Q64_ReadJEDEC(&jedec);
     printf("[Flash] JEDEC ID: 0x%02X%02X%02X\r\n",
            jedec.manufacturer, jedec.memory_type, jedec.capacity);
@@ -518,6 +542,15 @@ void Task_FlashLog(void *argument)
         jedec.capacity     != 0x17) {
         printf("[Flash] WARNING: Unexpected JEDEC!\r\n");
     }
+
+    /* 从 Flash 加载阈值 (必须在 W25Q64_Init 之后) */
+    Threshold_LoadFromFlash();
+
+    /* 打印当前阈值 */
+    thr_cfg = Threshold_GetConfig();
+    printf("[Threshold] Current: temp_high=%d C, volt_low=%d.%02dV, enabled=%d\r\n",
+           thr_cfg->temp_high, thr_cfg->volt_low / 100,
+           thr_cfg->volt_low % 100, thr_cfg->enabled);
 
     W25Q64_LogInit();
     printf("[Flash] Log OK, Count: %lu\r\n", W25Q64_LogGetCount());
@@ -533,9 +566,13 @@ void Task_FlashLog(void *argument)
             entry.adc_value   = adc.ch1.raw_value;
             entry.status      = sensor_data.dht11.status;
 
-            W25Q64_LogAppend(&entry);
-            printf("[Flash] Saved, Total: %lu\r\n",
-                   W25Q64_LogGetCount());
+            /* Flash 写入加锁 (与阈值保存互斥) */
+            if (osMutexAcquire(FlashMutex, pdMS_TO_TICKS(100)) == osOK) {
+                W25Q64_LogAppend(&entry);
+                osMutexRelease(FlashMutex);
+                printf("[Flash] Saved, Total: %lu\r\n",
+                       W25Q64_LogGetCount());
+            }
         }
     }
 }
@@ -623,6 +660,8 @@ int main(void)
   SensorDataQueue = osMessageQueueNew(SENSOR_QUEUE_SIZE,
                                       sizeof(SensorData_t), NULL);
 
+  FlashMutex = osMutexNew(NULL);
+
   /* USER CODE END RTOS_QUEUES */
 
   /* Create the thread(s) */
@@ -637,6 +676,8 @@ int main(void)
   TaskCANTXHandle    = osThreadNew(Task_CAN_TX,   NULL, &task_attr_high);
   TaskCANCMDHandle   = osThreadNew(Task_CAN_CMD,  NULL, &task_attr_high);
   TaskKeyScanHandle  = osThreadNew(Task_KeyScan,  NULL, &task_attr_high);
+  TaskRGBHandle      = osThreadNew(Task_RGB,      NULL, &task_attr_normal);
+  TaskFlashLogHandle = osThreadNew(Task_FlashLog, NULL, &task_attr_low);
 
   /* USER CODE END RTOS_THREADS */
 
@@ -991,6 +1032,14 @@ static void MX_GPIO_Init(void)
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
+
+  /* PA4 = W25Q64 CS (软件 NSS, 输出推挽, 默认高 = 未选中) */
+  GPIO_InitStruct.Pin = GPIO_PIN_4;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_4, GPIO_PIN_SET);
 
   /* USER CODE END MX_GPIO_Init_2 */
 }

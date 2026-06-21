@@ -164,10 +164,9 @@ void Task_CAN_RX(void *argument)
 
 void Task_OLED(void *argument)
 {
-    char line1[22], line2[22], line3[22], line4[22];
+    char line0[22], line1[22], line2[22], line3[22], line4[22], lineT[22];
     static CAN_SensorFrame_t last_sensor = {0};
     static uint8_t has_data = 0;
-    char limit_temp[12], limit_volt[12];
     SystemStatus_t prev_status = SYSTEM_SAFE;
 
     OLED_Init();
@@ -178,11 +177,6 @@ void Task_OLED(void *argument)
     OLED_ShowString(22, 3, "Board 2: RX");
     vTaskDelay(pdMS_TO_TICKS(1500));
     OLED_Clear();
-
-    /* 阈值显示 (静态, 页0-1) */
-    /* 默认: 温度>30°C告警, 电压<1.50V告警 */
-    snprintf(limit_temp, sizeof(limit_temp), "Thr: T>30C");
-    snprintf(limit_volt, sizeof(limit_volt), "Thr: V<1.5V");
 
     for (;;) {
         SystemStatus_FeedSensor();
@@ -200,6 +194,11 @@ void Task_OLED(void *argument)
             /* 避免 %%f (newlib-nano 不支持) — 用整数运算 */
             unsigned int v1_int = (unsigned int)(last_sensor.adc1 * 330U / 255);
             unsigned int v2_int = (unsigned int)(last_sensor.adc2 * 330U / 255);
+            snprintf(line0, sizeof(line0), "Thr:V<%u.%02uV",
+                     last_sensor.volt_threshold / 100,
+                     last_sensor.volt_threshold % 100);
+            snprintf(lineT, sizeof(lineT), "Thr:T>%dC",
+                     (int)g_can_rx_data.status.temp_threshold);
             snprintf(line1, sizeof(line1), "T:%dC  H:%d%%",
                      last_sensor.temp_int, last_sensor.humi_int);
             snprintf(line2, sizeof(line2), "V1:%u.%02uV V2:%u.%02uV",
@@ -210,6 +209,8 @@ void Task_OLED(void *argument)
                      g_can_rx_data.status.system_status,
                      SystemStatus_GetString());
         } else {
+            snprintf(line0, sizeof(line0), "Thr:V<--.--V");
+            snprintf(lineT, sizeof(lineT), "Thr:T>--C");
             snprintf(line1, sizeof(line1), "Waiting CAN...");
             snprintf(line2, sizeof(line2), "RX frames: 0");
             snprintf(line3, sizeof(line3), "");
@@ -218,7 +219,7 @@ void Task_OLED(void *argument)
         /* 第四行: 系统状态 (已由 Task_CAN_RX 同步 Board1 状态) */
         snprintf(line4, sizeof(line4), "[%s]", SystemStatus_GetString());
 
-        /* 填充空格到 21 字符, 彻底清除旧内容 */
+        /* 填充空格到 21 字符, 彻底清除旧内容 (line1/2/3/4) */
         for (uint8_t li = 0; li < 4; li++) {
             char *lp = (li == 0) ? line1 : (li == 1) ? line2 :
                        (li == 2) ? line3 : line4;
@@ -226,9 +227,18 @@ void Task_OLED(void *argument)
             while (l < 21) lp[l++] = ' ';
             lp[21] = '\0';
         }
+        /* line0/lineT 也填充到 21 字符 */
+        for (uint8_t li = 0; li < 2; li++) {
+            char *lp = (li == 0) ? line0 : lineT;
+            int l = strlen(lp);
+            while (l < 21) lp[l++] = ' ';
+            lp[21] = '\0';
+        }
 
-        /* 刷新 OLED */
+        /* 刷新 OLED: Page 0=V阈值, Page 1=温湿度, Page 2=T阈值, Page 3=电压, Page 5=状态, Page 7=系统 */
+        OLED_ShowString(0, 0, line0);
         OLED_ShowString(0, 1, line1);
+        OLED_ShowString(0, 2, lineT);
         OLED_ShowString(0, 3, line2);
         OLED_ShowString(0, 5, line3);
 

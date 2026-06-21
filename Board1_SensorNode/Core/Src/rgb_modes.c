@@ -106,6 +106,11 @@ void RGB_ModeKey2Control(uint8_t pressed)
     }
 }
 
+uint8_t RGB_IsKey2Override(void)
+{
+    return key2_override;
+}
+
 /* ==================== 告警红色呼吸灯 ==================== */
 static uint32_t alarm_breathe_tick = 0;
 static int16_t  alarm_breathe_step = 0;

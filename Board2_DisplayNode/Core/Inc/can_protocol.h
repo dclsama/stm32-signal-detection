@@ -41,7 +41,7 @@ typedef struct __attribute__((packed)) {
     uint8_t  adc1;              /* Byte 2: ADC1 8-bit (0-255 = 0-3.3V) */
     uint8_t  adc2;              /* Byte 3: ADC2 8-bit */
     uint8_t  sensor_status;     /* Byte 4: bit0=DHT11_OK, bit1=ADC1_OK, bit2=ADC2_OK */
-    uint8_t  reserved[2];       /* Byte 5-6: 保留 */
+    uint16_t volt_threshold;    /* Byte 5-6: 电压下限阈值 x100 (如 150=1.50V) */
     uint8_t  checksum;          /* Byte 7: XOR 校验 */
 } CAN_SensorFrame_t;
 
@@ -50,10 +50,11 @@ typedef struct __attribute__((packed)) {
 #define SENSOR_OK_ADC1          0x02
 #define SENSOR_OK_ADC2          0x04
 
-/* ==================== 状态帧格式 (CAN ID 0x202, 2 Byte) ==================== */
+/* ==================== 状态帧格式 (CAN ID 0x202, 4 Byte) ==================== */
 typedef struct __attribute__((packed)) {
-    uint8_t system_status;       /* Byte 0: 0=SAFE, 1=ERROR1, 2=ERROR2 */
-    uint8_t error_code;          /* Byte 1: 具体错误码 */
+    uint8_t  system_status;      /* Byte 0: 0=SAFE, 1=ERROR1, 2=ERROR2 */
+    uint8_t  error_code;         /* Byte 1: 具体错误码 */
+    int16_t  temp_threshold;     /* Byte 2-3: 温度上限阈值 (°C) */
 } CAN_StatusFrame_t;
 
 /* ==================== 确认帧格式 (CAN ID 0x301, 1 Byte) ==================== */
@@ -79,12 +80,14 @@ uint8_t CAN_CalcChecksum(uint8_t *data, uint8_t len);
 
 /**
  * @brief  打包状态帧
- * @param  frame   输出帧
- * @param  status  系统状态
- * @param  error   错误码
+ * @param  frame      输出帧
+ * @param  status     系统状态
+ * @param  error      错误码
+ * @param  temp_thr   温度阈值 (°C)
  */
 void CAN_PackStatusFrame(CAN_StatusFrame_t *frame,
-                         SystemStatus_t status, uint8_t error);
+                         SystemStatus_t status, uint8_t error,
+                         int16_t temp_thr);
 
 /**
  * @brief  打印 CAN 数据帧到串口 (调试用)

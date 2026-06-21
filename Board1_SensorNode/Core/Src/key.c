@@ -4,8 +4,9 @@
  *
  *          消抖原理:
  *          每隔 10ms 读一次按键电平，连续 3 次一致才判定状态变化。
- *          短按: 按下后 < 1s 释放
- *          长按: 按下后 ≥ 1s 触发一次
+ *          KEY1 短按: 按下后 < 1s 释放
+ *          KEY2 短按: 按下后 < 1s 释放 (新增: 切换预设阈值)
+ *          KEY2 长按: 按下后 ≥ 1s 触发一次
  */
 
 #include "key.h"
@@ -94,7 +95,11 @@ static KeyEvent_t Key_Process(KeyCtrl_t *k, uint8_t key_id)
                         event = KEY_EVENT_SHORT_1;  /* 短按 */
                     }
                     if (key_id == 2) {
-                        event = KEY_EVENT_RELEASE_2;
+                        if (k->press_ms < KEY_LONG_PRESS_MS) {
+                            event = KEY_EVENT_SHORT_2;   /* 短按 (<1s) */
+                        } else {
+                            event = KEY_EVENT_RELEASE_2; /* 长按释放 */
+                        }
                     }
                     k->state = KS_IDLE;
                 }
